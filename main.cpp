@@ -14,7 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include <cstdint>
 #include <stdio.h>
+#include <string>
+#include <mbed.h>
 
 #include "lorawan/LoRaWANInterface.h"
 #include "lorawan/system/lorawan_data_structures.h"
@@ -60,6 +63,10 @@ uint8_t rx_buffer[30];
  */
 DS1820  ds1820(PC_9);
 
+// Initialise the digital pin LED3 and LED2 as an output
+DigitalOut green_led(LED2);
+DigitalOut blue_led(LED3);
+
 /**
 * This event queue is the global event queue for both the
 * application and stack. To conserve memory, the stack is designed to run
@@ -86,6 +93,16 @@ static LoRaWANInterface lorawan(radio);
  * Application specific callbacks
  */
 static lorawan_app_callbacks_t callbacks;
+
+static bool is_class_c;
+
+static void switch_to_class_c();
+
+static void switch_to_class_a();
+
+static uint8_t receive_count = 0;
+
+static void send_specific_message(string message);
 
 /**
  * Entry point for application
@@ -126,6 +143,8 @@ int main(void)
         return -1;
     }
 
+    lorawan.set_device_class(CLASS_C);
+
     printf("\r\n Adaptive data  rate (ADR) - Enabled \r\n");
 
     retcode = lorawan.connect();
@@ -145,6 +164,22 @@ int main(void)
     return 0;
 }
 
+static void switch_to_class_c()
+{
+    lorawan.set_device_class(CLASS_C);
+    send_specific_message("ClassCSwitch");
+    blue_led = !green_led;
+    is_class_c = true;
+}
+
+static void switch_to_class_a()
+{
+    lorawan.set_device_class(CLASS_A);
+    send_specific_message("ClassAInit");
+    green_led = !blue_led;
+    is_class_c = false;
+}
+
 /**
  * Sends a message to the Network Server
  */
@@ -152,20 +187,8 @@ static void send_message()
 {
     uint16_t packet_len;
     int16_t retcode;
-    int32_t sensor_value;
 
-    if (ds1820.begin()) {
-        ds1820.startConversion();
-        sensor_value = ds1820.read();
-        printf("\r\n Dummy Sensor Value = %d \r\n", sensor_value);
-        ds1820.startConversion();
-    } else {
-        printf("\r\n No sensor found \r\n");
-        return;
-    }
-
-    packet_len = sprintf((char *) tx_buffer, "Dummy Sensor Value is %d",
-                         sensor_value);
+    packet_len = sprintf((char *) tx_buffer, "ClassCData");
 
     retcode = lorawan.send(MBED_CONF_LORA_APP_PORT, tx_buffer, packet_len,
                            MSG_UNCONFIRMED_FLAG);
@@ -177,7 +200,43 @@ static void send_message()
         if (retcode == LORAWAN_STATUS_WOULD_BLOCK) {
             //retry in 3 seconds
             if (MBED_CONF_LORA_DUTY_CYCLE_ON) {
-                ev_queue.call_in(3000, send_message);
+                // ev_queue.call_in(3000, send_message);
+            }
+        }
+        return;
+    }
+
+    printf("\r\n %d bytes scheduled for transmission \r\n", retcode);
+    memset(tx_buffer, 0, sizeof(tx_buffer));
+}
+
+/**
+ * Sends a specific message to the Network Server
+ */
+static void send_specific_message(string message)
+{
+    uint16_t packet_len;
+    int16_t retcode;
+
+    uint8_t n = message.length();
+
+    char string_arr[n + 1];
+
+    strcpy(string_arr, message.c_str());
+
+    packet_len = sprintf((char *) tx_buffer, string_arr);
+
+    retcode = lorawan.send(MBED_CONF_LORA_APP_PORT, tx_buffer, packet_len,
+                           MSG_UNCONFIRMED_FLAG);
+
+    if (retcode < 0) {
+        retcode == LORAWAN_STATUS_WOULD_BLOCK ? printf("send - WOULD BLOCK\r\n")
+        : printf("\r\n send() - Error code %d \r\n", retcode);
+
+        if (retcode == LORAWAN_STATUS_WOULD_BLOCK) {
+            //retry in 3 seconds
+            if (MBED_CONF_LORA_DUTY_CYCLE_ON) {
+                // ev_queue.call_in(3000, send_message);
             }
         }
         return;
@@ -192,11 +251,16 @@ static void send_message()
  */
 static void receive_message()
 {
+    receive_count++;
+    printf("\r\n count: %d \r\n", receive_count);
     uint8_t port;
     int flags;
+    // retcode is also the number of bytes in the message ? :-P
     int16_t retcode = lorawan.receive(rx_buffer, sizeof(rx_buffer), port, flags);
 
-    if (retcode < 0) {
+    if (retcode == -1001) {
+        printf("\r\n LoRaMAC have nothing to read. Probably just an ACK \r\n");
+    } else if (retcode < 0) {
         printf("\r\n receive() - Error code %d \r\n", retcode);
         return;
     }
@@ -205,6 +269,26 @@ static void receive_message()
     for (uint8_t i = 0; i < retcode; i++) {
         printf("%02x ", rx_buffer[i]);
     }
+    printf("\r\n");
+
+    auto received_msg = (char *) &rx_buffer;
+
+    if (strcmp(received_msg, "ClassCSwitch") == 0) {
+        printf("\r\n We should switch to class C if not already \r\n");
+
+        if (!is_class_c) {
+            switch_to_class_c();
+        }
+    }
+
+    if (strcmp(received_msg, "ClassASwitch") == 0) {
+        printf("\r\n We should switch to class A if not already \r\n");
+
+        if (is_class_c) {
+            switch_to_class_a();
+        }
+    }
+
     printf("\r\n");
     
     memset(rx_buffer, 0, sizeof(rx_buffer));
@@ -219,9 +303,9 @@ static void lora_event_handler(lorawan_event_t event)
         case CONNECTED:
             printf("\r\n Connection - Successful \r\n");
             if (MBED_CONF_LORA_DUTY_CYCLE_ON) {
-                send_message();
+                send_specific_message("ClassCInit");
             } else {
-                ev_queue.call_every(TX_TIMER, send_message);
+                // ev_queue.call_every(TX_TIMER, send_message);
             }
 
             break;
@@ -232,7 +316,7 @@ static void lora_event_handler(lorawan_event_t event)
         case TX_DONE:
             printf("\r\n Message Sent to Network Server \r\n");
             if (MBED_CONF_LORA_DUTY_CYCLE_ON) {
-                send_message();
+                receive_message();
             }
             break;
         case TX_TIMEOUT:
@@ -242,7 +326,7 @@ static void lora_event_handler(lorawan_event_t event)
             printf("\r\n Transmission Error - EventCode = %d \r\n", event);
             // try again
             if (MBED_CONF_LORA_DUTY_CYCLE_ON) {
-                send_message();
+                // send_message();
             }
             break;
         case RX_DONE:
@@ -259,7 +343,7 @@ static void lora_event_handler(lorawan_event_t event)
         case UPLINK_REQUIRED:
             printf("\r\n Uplink required by NS \r\n");
             if (MBED_CONF_LORA_DUTY_CYCLE_ON) {
-                send_message();
+                // send_message();
             }
             break;
         default:

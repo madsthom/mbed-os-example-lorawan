@@ -21,6 +21,7 @@
 /*
  * A dummy sensor for Mbed LoRa Test Application
  */
+#include <cstdint>
 class DS1820 {
 public:
     DS1820(uint32_t)
