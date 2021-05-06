@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 #include <cstdint>
+#include <cstdlib>
 #include <stdio.h>
 #include <string>
 #include <mbed.h>
@@ -34,7 +35,7 @@ using namespace events;
 // This example only communicates with much shorter messages (<30 bytes).
 // If longer messages are used, these buffers must be changed accordingly.
 uint8_t tx_buffer[30];
-uint8_t rx_buffer[30];
+uint8_t rx_buffer[LORAMAC_PHY_MAXPAYLOAD];
 
 /*
  * Sets up an application dependent transmission timer in ms. Used only when Duty Cycling is off for testing
@@ -106,7 +107,15 @@ static void switch_to_class_a();
 
 static uint8_t receive_count = 0;
 
+static void check_if_update(char* received_msg);
+
+static void update_firmware_counter(char* received_msg);
+
 static void send_specific_message(string message);
+
+static uint8_t update_count = 0;
+
+static uint8_t update_packets = 0;
 
 /**
  * Entry point for application
@@ -310,8 +319,61 @@ static void receive_message()
     }
 
     printf("\r\n");
+
+    check_if_update(received_msg);
+
+    update_firmware_counter(received_msg);
     
     memset(rx_buffer, 0, sizeof(rx_buffer));
+}
+
+static void print_rx_metadata()
+{
+    lorawan_rx_metadata metadata;
+    lorawan.get_rx_metadata(metadata);
+
+    printf("\r\n rssi: %d\r\n snr: %d\r\n time on air: %d\r\n datarate: %d\r\n channel: %d\r\n stale: %d\r\n",
+        metadata.rssi, metadata.snr, metadata.rx_toa, metadata.rx_datarate, metadata.channel, metadata.stale);
+}
+
+static void check_if_update(char* received_msg) {
+    char* substr = (char *)malloc(11);
+    strncpy(substr, received_msg, 11);
+
+    if (strcmp(substr, "StartUpdate") == 0) {
+        printf(" Starting firmware update....\r\n");
+        char* update_size = (char *)malloc(11);
+        strncpy(update_size, received_msg+11, sizeof(received_msg));
+        printf("\r\n Packet Size of Update: %d\r\n", atoi(update_size));
+        update_packets = atoi(update_size);
+        free(update_size);
+    }
+
+    free(substr);
+}
+
+static void update_firmware_counter(char* received_msg) {
+    char* substr = (char *)malloc(11);
+    strncpy(substr, received_msg, 10);
+    substr[10] = '\0';
+    printf("%s", substr);
+    if (strcmp(substr, "UpdateData") == 0) {
+        char* update_number = (char *)malloc(sizeof(received_msg));
+        strncpy(update_number, received_msg+10, sizeof(received_msg));
+        printf("\r\n Packet Number: %d of the update\r\n", atoi(update_number) + 1);
+        update_count = update_count + atoi(update_number) + 1;
+        free(update_number);
+        
+        printf("\r\n Update counts is now: %d\r\n", update_count);
+
+        if (update_count == ((update_packets*(update_packets+1))/2)) {
+            update_count = 0;
+            printf("\r\n Update successful!! - switching to Class A\r\n");
+            switch_to_class_a();
+        }
+    }
+
+    free(substr);
 }
 
 /**
@@ -359,6 +421,7 @@ static void lora_event_handler(lorawan_event_t event)
         case RX_DONE:
             printf("\r\n RX_DONE \r\n");
             printf("\r\n Received message from Network Server \r\n");
+            print_rx_metadata();       
             receive_message();
             break;
         case RX_TIMEOUT:
