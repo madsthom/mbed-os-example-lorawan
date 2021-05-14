@@ -107,11 +107,15 @@ static void switch_to_class_a();
 
 static uint8_t receive_count = 0;
 
+static uint8_t send_count = 1;
+
 static void check_if_update(char* received_msg);
 
 static void update_firmware_counter(char* received_msg);
 
 static void send_specific_message(string message);
+
+static void send_class_c_msg();
 
 static uint8_t update_count = 0;
 
@@ -203,6 +207,36 @@ static void switch_to_class_a()
     send_specific_message("ClassAInit");
 }
 
+static void send_class_c_msg()
+{
+    uint16_t packet_len;
+    int16_t retcode;
+
+    packet_len = sprintf((char *) tx_buffer, "OutOfSignal");
+
+    retcode = lorawan.send(MBED_CONF_LORA_APP_PORT, tx_buffer, packet_len,
+                           MSG_UNCONFIRMED_FLAG);
+
+    if (retcode < 0) {
+        retcode == LORAWAN_STATUS_WOULD_BLOCK ? printf("\r\n send - WOULD BLOCK\r\n")
+        : printf("\r\n send() - Error code %d \r\n", retcode);
+
+        ev_queue.call_in(3000, send_class_c_msg);
+
+        if (retcode == LORAWAN_STATUS_WOULD_BLOCK) {
+            //retry in 3 seconds
+            if (MBED_CONF_LORA_DUTY_CYCLE_ON && is_class_c == 0) {
+                printf("\r\n Should send message now in class A \r\n");
+                ev_queue.call_in(3000, send_class_c_msg);
+            }
+        }
+        return;
+    }
+
+    printf("\r\n %d bytes scheduled for transmission \r\n", retcode);
+    memset(tx_buffer, 0, sizeof(tx_buffer));
+}
+
 /**
  * Sends a message to the Network Server
  */
@@ -213,7 +247,7 @@ static void send_message()
     uint16_t packet_len;
     int16_t retcode;
 
-    packet_len = sprintf((char *) tx_buffer, "DataFromEndDevice");
+    packet_len = sprintf((char *) tx_buffer, "DataFromEndDevice %d", send_count);
 
     retcode = lorawan.send(MBED_CONF_LORA_APP_PORT, tx_buffer, packet_len,
                            MSG_UNCONFIRMED_FLAG);
@@ -233,7 +267,8 @@ static void send_message()
 
     printf("\r\n %d bytes scheduled for transmission \r\n", retcode);
     memset(tx_buffer, 0, sizeof(tx_buffer));
-    printf(" With the message: DataFromEndDevice\r\n");
+    printf(" With the message: DataFromEndDevice %d\r\n", send_count);
+    send_count++;
 }
 
 /**
@@ -332,6 +367,24 @@ static void print_rx_metadata()
     lorawan_rx_metadata metadata;
     lorawan.get_rx_metadata(metadata);
 
+    if (metadata.rssi < -120) {
+        printf("\r\n rssi is less than -120\r\n");
+        //send_class_c_msg();
+        int16_t retcode;
+        //printf("\r\n Link check: %d", retcode);
+        lorawan.disconnect();
+        retcode = lorawan.connect();
+
+        if (retcode == LORAWAN_STATUS_OK ||
+                retcode == LORAWAN_STATUS_CONNECT_IN_PROGRESS) {
+        } else {
+            printf("\r\n Connection error, code = %d \r\n", retcode);
+        }
+
+        // make your event queue dispatching events forever
+        ev_queue.dispatch_forever();
+    }
+
     printf("\r\n rssi: %d\r\n snr: %d\r\n time on air: %d\r\n datarate: %d\r\n channel: %d\r\n stale: %d\r\n",
         metadata.rssi, metadata.snr, metadata.rx_toa, metadata.rx_datarate, metadata.channel, metadata.stale);
 }
@@ -356,15 +409,12 @@ static void update_firmware_counter(char* received_msg) {
     char* substr = (char *)malloc(11);
     strncpy(substr, received_msg, 10);
     substr[10] = '\0';
-    printf("%s", substr);
     if (strcmp(substr, "UpdateData") == 0) {
         char* update_number = (char *)malloc(sizeof(received_msg));
-        strncpy(update_number, received_msg+10, sizeof(received_msg));
+        strncpy(update_number, received_msg+10, 4);
         printf("\r\n Packet Number: %d of the update\r\n", atoi(update_number) + 1);
         update_count = update_count + atoi(update_number) + 1;
         free(update_number);
-        
-        printf("\r\n Update counts is now: %d\r\n", update_count);
 
         if (update_count == ((update_packets*(update_packets+1))/2)) {
             update_count = 0;
@@ -436,9 +486,6 @@ static void lora_event_handler(lorawan_event_t event)
             if (MBED_CONF_LORA_DUTY_CYCLE_ON) {
                 // send_message();
             }
-            break;
-        case CLASS_CHANGED:
-            printf("class changed");
             break;
         default:
             MBED_ASSERT("Unknown Event");
