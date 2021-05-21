@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <stdio.h>
@@ -120,6 +121,8 @@ static void send_class_c_msg();
 static uint8_t update_count = 0;
 
 static uint8_t update_packets = 0;
+static int event_id = 0;
+static uint8_t out_of_signal = 0;
 
 /**
  * Entry point for application
@@ -221,19 +224,20 @@ static void send_class_c_msg()
         retcode == LORAWAN_STATUS_WOULD_BLOCK ? printf("\r\n send - WOULD BLOCK\r\n")
         : printf("\r\n send() - Error code %d \r\n", retcode);
 
-        ev_queue.call_in(3000, send_class_c_msg);
+        ev_queue.call_in(chrono::seconds(3), send_class_c_msg);
 
         if (retcode == LORAWAN_STATUS_WOULD_BLOCK) {
             //retry in 3 seconds
             if (MBED_CONF_LORA_DUTY_CYCLE_ON && is_class_c == 0) {
                 printf("\r\n Should send message now in class A \r\n");
-                ev_queue.call_in(3000, send_class_c_msg);
+                ev_queue.call_in(chrono::seconds(3), send_class_c_msg);
             }
         }
         return;
     }
 
-    printf("\r\n %d bytes scheduled for transmission \r\n", retcode);
+    //printf("\r\n %d bytes scheduled for transmission \r\n", retcode);
+    printf("\r\n Out of Signal uplink sent \r\n");
     memset(tx_buffer, 0, sizeof(tx_buffer));
 }
 
@@ -259,15 +263,15 @@ static void send_message()
         if (retcode == LORAWAN_STATUS_WOULD_BLOCK) {
             //retry in 3 seconds
             if (MBED_CONF_LORA_DUTY_CYCLE_ON && is_class_c == 0) {
-                ev_queue.call_in(3000, send_message);
+                ev_queue.call_in(chrono::seconds(3), send_message);
             }
         }
         return;
     }
 
-    printf("\r\n %d bytes scheduled for transmission \r\n", retcode);
+    //printf("\r\n %d bytes scheduled for transmission \r\n", retcode);
     memset(tx_buffer, 0, sizeof(tx_buffer));
-    printf(" With the message: DataFromEndDevice %d\r\n", send_count);
+    //printf(" With the message: DataFromEndDevice %d\r\n", send_count);
     send_count++;
 }
 
@@ -287,7 +291,7 @@ static void send_specific_message(string message)
 
     strcpy(string_arr, message.c_str());
 
-    packet_len = sprintf((char *) tx_buffer, string_arr);
+    packet_len = sprintf((char *) tx_buffer, "%s", string_arr);
 
     retcode = lorawan.send(MBED_CONF_LORA_APP_PORT, tx_buffer, packet_len,
                            MSG_UNCONFIRMED_FLAG);
@@ -296,19 +300,19 @@ static void send_specific_message(string message)
         retcode == LORAWAN_STATUS_WOULD_BLOCK ? printf("\r\n send - WOULD BLOCK\r\n")
         : printf("\r\n send() - Error code %d \r\n", retcode);
 
-        ev_queue.call_in(3000, send_message);
+        ev_queue.call_in(chrono::seconds(3), send_message);
 
         if (retcode == LORAWAN_STATUS_WOULD_BLOCK) {
             //retry in 3 seconds
             if (MBED_CONF_LORA_DUTY_CYCLE_ON && is_class_c == 0) {
                 printf("\r\n Should send message now in class A \r\n");
-                ev_queue.call_in(3000, send_message);
+                ev_queue.call_in(chrono::seconds(3), send_message);
             }
         }
         return;
     }
 
-    printf("\r\n %d bytes scheduled for transmission \r\n", retcode);
+    //printf("\r\n %d bytes scheduled for transmission \r\n", retcode);
     memset(tx_buffer, 0, sizeof(tx_buffer));
 }
 
@@ -318,7 +322,7 @@ static void send_specific_message(string message)
 static void receive_message()
 {
     receive_count++;
-    printf("\r\n Packets receive count: %d \r\n", receive_count);
+    //printf("\r\n Packets receive count: %d \r\n", receive_count);
     uint8_t port;
     int flags;
     // retcode is also the number of bytes in the message ? :-P
@@ -331,15 +335,15 @@ static void receive_message()
         return;
     }
 
-    printf(" RX Data on port %u (%d bytes): ", port, retcode);
+    //printf(" RX Data on port %u (%d bytes): ", port, retcode);
     for (uint8_t i = 0; i < retcode; i++) {
-        printf("%02x ", rx_buffer[i]);
+        //printf("%02x ", rx_buffer[i]);
     }
-    printf("\r\n");
+    //printf("\r\n");
 
     auto received_msg = (char *) &rx_buffer;
 
-    printf("\r\n With message: %s \r\n", received_msg);
+    //printf("\r\n With message: %s \r\n", received_msg);
 
     if (strcmp(received_msg, "ClassCSwitch") == 0) {
         printf("\r\n We should switch to class C if not already \r\n");
@@ -355,7 +359,7 @@ static void receive_message()
 
     printf("\r\n");
 
-    check_if_update(received_msg);
+    //check_if_update(received_msg);
 
     update_firmware_counter(received_msg);
     
@@ -367,25 +371,28 @@ static void print_rx_metadata()
     lorawan_rx_metadata metadata;
     lorawan.get_rx_metadata(metadata);
 
-    if (metadata.rssi < -120) {
-        printf("\r\n rssi is less than -120\r\n");
-        //send_class_c_msg();
-        int16_t retcode;
-        //printf("\r\n Link check: %d", retcode);
-        lorawan.disconnect();
-        retcode = lorawan.connect();
+    int periodically = 0;
 
-        if (retcode == LORAWAN_STATUS_OK ||
-                retcode == LORAWAN_STATUS_CONNECT_IN_PROGRESS) {
+    if (periodically) {
+        event_id = ev_queue.call_every(chrono::seconds(20), send_specific_message, "HeartBeatPing");
+    } else {
+        if (metadata.rssi < -110) {
+            printf("\r\n rssi is less than -110\r\n");
+            //send_class_c_msg();
+            if (out_of_signal != 1) {
+                send_class_c_msg();
+                event_id = ev_queue.call_every(chrono::seconds(10), send_class_c_msg);
+            }
+            out_of_signal = 1;
         } else {
-            printf("\r\n Connection error, code = %d \r\n", retcode);
-        }
-
-        // make your event queue dispatching events forever
-        ev_queue.dispatch_forever();
+            out_of_signal = 0;
+            if (event_id != 0) {
+                ev_queue.cancel(event_id);
+            }
+        }   
     }
 
-    printf("\r\n rssi: %d\r\n snr: %d\r\n time on air: %d\r\n datarate: %d\r\n channel: %d\r\n stale: %d\r\n",
+    printf(" rssi: %d snr: %d time on air: %d datarate: %d channel: %d stale: %d \r\n",
         metadata.rssi, metadata.snr, metadata.rx_toa, metadata.rx_datarate, metadata.channel, metadata.stale);
 }
 
@@ -412,15 +419,8 @@ static void update_firmware_counter(char* received_msg) {
     if (strcmp(substr, "UpdateData") == 0) {
         char* update_number = (char *)malloc(sizeof(received_msg));
         strncpy(update_number, received_msg+10, 4);
-        printf("\r\n Packet Number: %d of the update\r\n", atoi(update_number) + 1);
-        update_count = update_count + atoi(update_number) + 1;
+        printf(" Update number: %d\r\n", atoi(update_number));
         free(update_number);
-
-        if (update_count == ((update_packets*(update_packets+1))/2)) {
-            update_count = 0;
-            printf("\r\n Update successful!! - switching to Class A\r\n");
-            switch_to_class_a();
-        }
     }
 
     free(substr);
@@ -444,14 +444,17 @@ static void lora_event_handler(lorawan_event_t event)
                 // ev_queue.call_every(TX_TIMER, send_message);
             }
 
+            ev_queue.call_in(chrono::seconds(5), switch_to_class_c);
+
+
             break;
         case DISCONNECTED:
             ev_queue.break_dispatch();
             printf("\r\n Disconnected Successfully \r\n");
             break;
         case TX_DONE:
-            printf("\r\n TX_DONE \r\n");
-            printf("\r\n Message Sent to Network Server \r\n");
+            //printf("\r\n TX_DONE \r\n");
+            //printf("\r\n Message Sent to Network Server \r\n");
             if (MBED_CONF_LORA_DUTY_CYCLE_ON && is_class_c == 1) {
                 //receive_message();
             } else if (MBED_CONF_LORA_DUTY_CYCLE_ON && is_class_c == 0) {
@@ -470,7 +473,7 @@ static void lora_event_handler(lorawan_event_t event)
             break;
         case RX_DONE:
             printf("\r\n RX_DONE \r\n");
-            printf("\r\n Received message from Network Server \r\n");
+            //printf("\r\n Received message from Network Server \r\n");
             print_rx_metadata();       
             receive_message();
             break;
